@@ -1,4 +1,5 @@
 import os
+from tkinter import E
 import gym
 import numpy as np
 import tensorflow as tf
@@ -22,8 +23,10 @@ class Model_Gradient_Policy(Model):
     self.out = Dense(action_space, activation = 'softmax')
 
   def call(self, input_data):
+    #print("input data.shape = ", input_data.shape)
     Input_layer = tf.convert_to_tensor(input_data)
-    X = self.d1(input_data)
+    #print("Input_layer = ", Input_layer)
+    X = self.d1(Input_layer)
     X = self.d2(X)
     X = self.d3(X)
     Output = self.out(X)
@@ -34,17 +37,14 @@ class PGAgent():
   #Policy Gradient Main Opimization Algorithm
   def __init__(self, env_name):
     #Environment and PG parameters
+    self.agent_name = "Vanilla_Gradient"
     self.env_name = env_name
     self.env = gym.make(env_name)
     self.action_space = self.env.action_space.n
     self.state_space = self.env.observation_space.shape[0]
 
     self.EPISODES = 3000
-    self.lr = 0.000025
-
-    self.ROWS = 80
-    self.COLS = 80
-    self.REM_STEP = 4
+    self.lr = 0.001
 
     #instantiate games, plot memory
     self.states, self.actions, self.rewards = [], [], []
@@ -54,13 +54,13 @@ class PGAgent():
     self.image_memory = np.zeros(self.state_space)
 
     if not os.path.exists(self.Save_Path): os.makedirs(self.Save_Path)
-    self.path = '{}_PG_{}'.format(self.env_name, self.lr)
+    self.path = '{}_{}_LR_{}'.format(self.agent_name, self.env_name, self.lr)
     self.Model_name = os.path.join(self.Save_Path, self.path)
 
     self.Actor = Model_Gradient_Policy(action_space = self.action_space, observation_space=self.state_space)
     self.optimizer = RMSprop(learning_rate=self.lr)
 
-    self.max_average = 0
+    self.max_average = 300
 
   def remember(self, state, action, reward):
     self.states.append(state)
@@ -94,7 +94,7 @@ class PGAgent():
   
     return discounted_r
 
-  def compute_loss(prob, action, reward):
+  def compute_loss(self, prob, action, reward):
     dist = tfp.distributions.Categorical(probs = prob)
     log_prob = dist.log_prob(action)
     loss = - log_prob * reward
@@ -102,6 +102,7 @@ class PGAgent():
 
 
   def replay(self):
+    
     states = np.vstack(self.states)
     actions = np.vstack(self.actions)
     
@@ -112,12 +113,10 @@ class PGAgent():
     # iterate over batches of trainin data
     for state, action, d_reward in zip(states, actions, discounted_r):
         
-      print("state = {}, action = {}, reward = {}", state, action, d_reward)
-
       with tf.GradientTape() as tape:
         # forward pass of the layer
-        prob = self.Actor(np.array(state), training=True)
-        print("probability = ", prob)
+        prob = self.Actor(np.array(state, ndmin=2), training=True)
+        #print("probability = ", prob)
         # Calcualte the policy loss
         loss =  self.compute_loss(prob, action, d_reward)
 
@@ -129,12 +128,6 @@ class PGAgent():
 
     self.states, self.actions, self.rewards = [], [], []
   
-  def reset(self):
-    frame = self.env.reset()
-    for i in range(self.REM_STEP):
-        state = self.GetImage(frame)
-    return state
-
   def run(self):
     for e in range(self.EPISODES):
       state = self.env.reset()
@@ -153,6 +146,8 @@ class PGAgent():
 
         state = next_state
         score += reward
+        
+        self.PlotModel(score, e)
 
         if done:
           
@@ -178,8 +173,9 @@ class PGAgent():
       if str(episode)[-2:] == "00":# much faster than episode % 100
           pylab.plot(self.episodes, self.scores, 'b')
           pylab.plot(self.episodes, self.average, 'r')
+          pylab.title(self.agent_name + self.env_name, fontsize=18 )
           pylab.ylabel('Score', fontsize=18)
-          pylab.xlabel('Steps', fontsize=18)
+          pylab.xlabel('Episodes', fontsize=18)
           try:
               pylab.savefig(self.path+".png")
           except OSError:
