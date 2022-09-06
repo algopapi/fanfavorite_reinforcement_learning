@@ -34,8 +34,6 @@ class Vanilla_Agent():
 
 
   def run(self):
-    
-    
     for e in range(self.EPISODES):
       state = self.env.reset()
       t = 0
