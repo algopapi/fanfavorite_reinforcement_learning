@@ -3,6 +3,7 @@ import tensorflow as tf
 import tensorflow_quantum as tfq
 
 import gym, cirq, sympy
+import pylab
 import numpy as np
 from functools import reduce
 from collections import deque, defaultdict
