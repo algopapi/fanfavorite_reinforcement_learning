@@ -12,7 +12,7 @@ def PlotModel(agent, score, episode):
         pylab.ylabel('Score', fontsize=18)
         pylab.xlabel('Episodes', fontsize=18)
         try:
-            pylab.savefig(agent.path+".png")
+            pylab.savefig(agent.Plot_name+".png")
         except OSError:
             pass
     return agent.average[-1]

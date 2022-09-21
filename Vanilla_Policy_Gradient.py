@@ -136,7 +136,7 @@ class PGAgent():
 
       while not done:
         
-        self.env.render()
+        #self.env.render()
         action = self.act(state)
 
         next_state, reward, done, _ = self.step(action)
