@@ -3,7 +3,7 @@ import numpy as np
 
 import os
 import gym
-import time
+import datetime
 
 from tensorflow.keras.models import Model, load_model, save_model
 from tensorflow.keras.layers import Dense, Layer
@@ -12,6 +12,7 @@ from tensorflow.keras.optimizers import Adam
 
 from matplotlib import pyplot
 from utils.plotmodel import PlotModel
+
 
 class A2C_Network(Model):
     """ Actor-Critic Style Network"""
@@ -22,8 +23,8 @@ class A2C_Network(Model):
         name="A2C_Network"    
     ):
         super(A2C_Network, self).__init__(name=name)
-        self.d1 = Dense(512, input_shape=(observation_space,), activation="relu", kernel_initializer="he_uniform")
-        self.d2 = Dense(256, activation="relu", kernel_initializer="he_uniform")
+        self.d1 = Dense(64, input_shape=(observation_space,), activation="relu", kernel_initializer="he_uniform")
+        self.d2 = Dense(64, activation="relu", kernel_initializer="he_uniform")
         self.d3 = Dense(64, activation="relu", kernel_initializer="he_uniform")
         
         self.actor = Dense(action_space, activation="softmax", kernel_initializer="he_uniform")
@@ -32,7 +33,7 @@ class A2C_Network(Model):
     def call(self, inputs):
         x = self.d1(inputs)
         x = self.d2(x)
-        x = self.d3(x)
+        #x = self.d3(x)
         return self.actor(x), self.critic(x)
 
 
@@ -67,9 +68,10 @@ class A2C_Agent():
         self.Plot_name = os.path.join(self.Plot_Path, self.path)
 
         self.A2C_Network = A2C_Network(action_space = self.action_space, observation_space=self.state_space)
-        self.critic_loss = Huber()
+        self.critic_loss = MeanSquaredError()
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
         self.max_average = 300
+
 
     def returns(self):
         reward_array = np.array(self.rewards)
@@ -121,10 +123,13 @@ class A2C_Agent():
                             SAVING = ""
                             print("episode: {}/{}, score: {}, average: {:.2f} {}".format(e, self.EPISODES, score, average, SAVING))
                         break
-        
+                
                 # Calculate Losses
                 actor_losses = []
                 critic_losses = []
+
+                actor_loss = tf.keras.metrics.Mean('actor_loss', dtype=tf.float32)
+                critic_loss = tf.keras.metrics.Mean('critic_loss', dtype=tf.float32)
 
                 history = zip(self.action_probs, self.current_critic_values, self.next_critic_values, self.rewards, self.dones)
                 for action_prob, current_cv, next_cv, reward, done in history:
@@ -139,15 +144,33 @@ class A2C_Agent():
                         self.critic_loss(tf.expand_dims(td_target,0), tf.expand_dims(current_cv,0))
                     )
             
-                total_loss = sum(actor_losses) + sum(critic_losses)
+                actor_sum = sum(actor_losses) * self.ACTOR_LOSS_WEIGHT
+                critic_sum = sum(critic_losses) * self.CRITIC_LOSS_WEIGHT
+                
+                total_loss = actor_sum + critic_sum
                 grads = tape.gradient(total_loss, self.A2C_Network.trainable_variables)
                 self.optimizer.apply_gradients(zip(grads, self.A2C_Network.trainable_variables))
                 
+                # Logging 
+                actor_loss(actor_sum)
+                critic_loss(critic_sum)
+
+                tf.summary.scalar('actor loss', actor_loss.result(), step=e)
+                tf.summary.scalar('critic loss', critic_loss.result(), step=e)
+
                 # Clear Memory
                 self.action_probs, self.rewards, self.dones = [], [], []
                 self.next_critic_values,  self.current_critic_values = [], [] 
 
 if __name__ == "__main__":
-    env_name = 'CartPole-v1'
-    agent = A2C_Agent(env_name)
-    agent.run()
+
+    #session = tf.InteractiveSession()
+
+    log_dir = "logs/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    print("logdir", log_dir)
+    summary_writer = tf.summary.create_file_writer(log_dir)
+
+    with summary_writer.as_default():
+        env_name = 'CartPole-v1'
+        agent = A2C_Agent(env_name)
+        agent.run()
