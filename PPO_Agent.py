@@ -16,27 +16,44 @@ from matplotlib import pyplot
 from utils.plotmodel import PlotModel
 
 
-class PPO_Network(Model):
-    """ Actor-Critic Style Network"""
+class PPO_Actor(Model):
+    """ Actor Network"""
     def __init__(
         self, 
         observation_space, 
         action_space,
-        name="PPO_Network"    
+        name="PPO_Actor"    
     ):
-        super(PPO_Network, self).__init__(name=name)
+        super(PPO_Actor, self).__init__(name=name)
         self.d1 = Dense(512, input_shape=(observation_space,), activation="relu", kernel_initializer="he_uniform")
         self.d2 = Dense(256, activation="relu", kernel_initializer="he_uniform")
         self.d3 = Dense(64, activation="relu", kernel_initializer="he_uniform")
-        
-        self.actor = Dense(action_space, activation="softmax", kernel_initializer="he_uniform")
+        self.actor = Dense(action_space, activation=None, kernel_initializer="he_uniform")
+    
+    def call(self, inputs):
+        x = self.d1(inputs)
+        x = self.d2(x)
+        x = self.d3(x)
+        return self.actor(x)
+
+class PPO_Critic(Model):
+    """ Critic Network"""
+    def __init__(
+        self, 
+        observation_space, 
+        name="PPO_Critic"    
+    ):
+        super(PPO_Critic, self).__init__(name=name)
+        self.d1 = Dense(512, input_shape=(observation_space,), activation="relu", kernel_initializer="he_uniform")
+        self.d2 = Dense(256, activation="relu", kernel_initializer="he_uniform")
+        self.d3 = Dense(64, activation="relu", kernel_initializer="he_uniform")
         self.critic = Dense(1, activation="linear", kernel_initializer="he_uniform")
     
     def call(self, inputs):
         x = self.d1(inputs)
         x = self.d2(x)
         x = self.d3(x)
-        return self.actor(x), self.critic(x)
+        return self.critic(x)
 
 
 
@@ -49,15 +66,16 @@ class PPO_Agent():
         self.state_space = self.env.observation_space.shape[0]
 
         self.EPISODES = 3000
-        self.lr = 0.000025
-        self.gamma = 0.94
+        self.max_steps_per_episode = 500
+        self.lr = 0.0005
+        self.gamma = 0.95
         self.clip_epsilon = 0.3
         self.epsilon = np.finfo(np.float32).eps.item() 
         self.clip_epsilon = 0.2
 
         #instantiate games, plot memory
-        self.states, self.next_states, self.action_probs, self.rewards, self.dones = [], [], [], [], []
-        self.critic_values = [] 
+        self.states, self.actions, self.action_probs, self.rewards, self.dones = [], [], [], [], []
+        self.critic_values = []
         self.episodes, self.scores, self.average = [], [], []
 
         self.Save_Path = './Models'
@@ -71,16 +89,22 @@ class PPO_Agent():
         self.Model_name = os.path.join(self.Save_Path, self.path)
         self.Plot_name = os.path.join(self.Plot_Path, self.path)
 
-        self.PPO_Network = PPO_Network(action_space = self.action_space, observation_space=self.state_space)
-        self.critic_loss = Huber()
-        self.optimizer = tf.keras.optimizers.RMSprop(learning_rate=self.lr)
+        self.PPO_Actor = PPO_Actor(action_space = self.action_space, observation_space=self.state_space)
+        self.PPO_Critic = PPO_Critic(observation_space = self.state_space)
+
+        self.actor_optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
+        self.critic_optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
+
+        self.actor_train_iterations = 10
+        self.critic_train_itartions = 5
+
         self.max_average = 300
+        self.n_epochs_per_batch = 5
 
         self.ACTOR_LOSS_WEIGHT = 1
-        self.CRITIC_LOSS_WEIGHT = 0.5
+        self.CRITIC_LOSS_WEIGHT = 1
 
-    def returns(self):
-        reward_array = np.array(self.rewards)
+    def returns(self, reward_array):
         returns=np.zeros_like(reward_array)
         sum = 0
         for i in reversed(range(0, len(reward_array))):
@@ -88,78 +112,114 @@ class PPO_Agent():
             returns[i] = sum
         return returns
 
+    def logprobabilities(self, logits, a):
+        logprobabilities_all = tf.nn.log_softmax(logits)
+        onehots = tf.one_hot(a, self.action_space)
+        
+        logprobability = tf.reduce_sum(
+           onehots * logprobabilities_all, axis=1
+        )
+        return logprobability
+
+    def get_action(self, observation):
+        logits = self.PPO_Actor(observation)
+        action = tf.squeeze(tf.random.categorical(logits, 1), axis=1)
+        return logits, action
+
+
     def run(self):
-        running_reward = 0
         for e in range(self.EPISODES):     
             state = self.env.reset()
-            with tf.GradientTape() as tape:
-                done, score, SAVING = False, 0, ''
-                while not done:          # episode
-                    state = tf.convert_to_tensor(state)
-                    state = tf.expand_dims(state, 0)
+            done, score, SAVING = False, 0, ''
+            while not done:          # episode
+                state = tf.convert_to_tensor(state)
+                state = tf.expand_dims(state, 0)
+                self.states.append(state)
+                
+                logits, action = self.get_action(state)
+                log_probs = self.logprobabilities(logits, action)
 
-                    action_probabilities, critic_v = self.PPO_Network(state)
-                    self.critic_values.append(critic_v[0,0])
+                self.action_probs.append(log_probs)
+                self.actions.append(action)
+
+                critic_value = self.PPO_Critic(state)
+                self.critic_values.append(critic_value[0,0])
+                
+                state, reward, done, _ = self.env.step(action[0].numpy())
+                self.rewards.append(reward)
+                self.dones.append(done)
+
+                score += reward
+
+                if done:
+                    average = PlotModel(self, score, e)
+                    if average >= self.max_average:
+                        self.max_average = average
+                        self.save()
+                        SAVING = "SAVING"
+                    else:
+                        SAVING = ""
+                        print("episode: {}/{}, score: {}, average: {:.2f} {}".format(e, self.EPISODES, score, average, SAVING))
+                    break
+    
+            
+           
+            # Calculate returns and Normalize
+            reward_array = np.array(self.rewards)
+            batch_returns = self.returns(reward_array)
+            batch_returns = (batch_returns - np.mean(batch_returns)) / (np.std(batch_returns) + self.epsilon)
+            
+            # Convert some buffer lists to numpy arrays 
+            actions = np.squeeze(np.array(self.actions))
+            batch_states = tf.convert_to_tensor(self.states)
+            batch_log_probs = np.array(self.action_probs)
+
+            print("batch_log_probs", batch_log_probs)
+            print("actions", actions)
+            # Calculate Advanatges
+            batch_critic_values = np.array(self.critic_values)
+            batch_advantages = batch_returns - batch_critic_values
+
+            # Start Policy Training loop
+            for _ in range(self.actor_train_iterations):
+                with tf.GradientTape() as tape:                    
+                    """Get action_probs & critic values from network under current policy and        
+                    calculate the ratios of the current batch """
+
+                    logits = self.PPO_Actor(batch_states)
+                    logprobs = self.logprobabilities(np.squeeze(logits), actions)
+                    logprobs = tf.expand_dims(logprobs, axis=-1)
+                    ratios = np.squeeze(tf.exp(logprobs - batch_log_probs))
                     
-                    action = np.random.choice(self.action_space, p=np.squeeze(action_probabilities))
-                    self.action_probs.append(tf.math.log(action_probabilities[0, action]))
-                    
-                    state, reward, done, _ = self.env.step(action)
-                    self.rewards.append(reward)
-                    self.dones.append(done)
-
-                    score += reward
-                    
-                    if done:
-                        average = PlotModel(self, score, e)
-                        if average >= self.max_average:
-                            self.max_average = average
-                            self.save()
-                            SAVING = "SAVING"
-                        else:
-                            SAVING = ""
-                            print("episode: {}/{}, score: {}, average: {:.2f} {}".format(e, self.EPISODES, score, average, SAVING))
-                        break
-        
-                # Calculate returns
-                returns = self.returns()
-        
-                #Normalize
-                returns = (returns - np.mean(returns)) / (np.std(returns) + self.epsilon)
-
-                # Calculate Losses
-                actor_losses = []
-                critic_losses = []
-
-                actor_loss = tf.keras.metrics.Mean('actor_loss', dtype=tf.float32)
-                critic_loss = tf.keras.metrics.Mean('critic_loss', dtype=tf.float32)
-
-                for action_prob, critic_value, ret in zip(self.action_probs, self.critic_values, returns):
-
-                    # Calculate loss for each action value pair
-                    diff = ret - critic_value
-                    
-                    # Find importance ratio
-                    importance_ratio = action_prob - 
-
-                    actor_losses.append(-action_prob * diff)
-
-                    critic_losses.append(
-                        self.critic_loss(tf.expand_dims(critic_value,0), tf.expand_dims(ret,0))
+                    min_advantage = tf.where(
+                        batch_advantages > 0, 
+                        (1 + self.clip_epsilon) * batch_advantages,
+                        (1 - self.clip_epsilon) * batch_advantages
                     )
 
-                actor_loss = sum(actor_losses)
-                critic_loss = sum(critic_losses)
-                total_loss = actor_loss + critic_loss
+                    policy_loss = -tf.reduce_mean(
+                        tf.minimum(ratios * batch_advantages, min_advantage)
+                    )
 
-                grads = tape.gradient(total_loss, self.PPO_Network.trainable_variables)
-                self.optimizer.apply_gradients(zip(grads, self.PPO_Network.trainable_variables))
+                # Do gradient ascent step
+                grads = tape.gradient(policy_loss, self.PPO_Actor.trainable_variables)
+                self.actor_optimizer.apply_gradients(zip(grads, self.PPO_Actor.trainable_variables))
 
-                # Logging 
-                actor_loss(actor_loss)
-                critic_loss(critic_loss)
+            # Start Critic Training Loop
+            for _ in range(self.critic_train_iterations):
+                with tf.GradientTape() as tape:
+                
+                    critic_values = self.PPO_Critic(batch_states)
 
-                self.action_probs, self.critic_values, self.rewards, self.dones = [], [], [], []
+                    critic_loss = tf.reduce_mean(
+                        (batch_returns - critic_values) ** 2
+                    )
+
+                grads = tape.gradient(critic_loss, self.PPO_Critic.trainable_variables)
+                self.critic_optimizer.apply_gradients(zip(grads, self.PPO_Critic.trainable_variables))
+
+            # Clear the buffer after each episode
+            self.action_probs, self.critic_values, self.rewards, self.states, self.actions, self.dones = [], [], [], [], [], []
 
 if __name__ == "__main__":
     env_name = 'CartPole-v1'
