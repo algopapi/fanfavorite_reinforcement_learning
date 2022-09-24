@@ -25,15 +25,15 @@ class PPO_Actor(Model):
         name="PPO_Actor"    
     ):
         super(PPO_Actor, self).__init__(name=name)
-        self.d1 = Dense(512, input_shape=(observation_space,), activation="relu", kernel_initializer="he_uniform")
-        self.d2 = Dense(256, activation="relu", kernel_initializer="he_uniform")
+        self.d1 = Dense(128, input_shape=(observation_space,), activation="relu", kernel_initializer="he_uniform")
+        self.d2 = Dense(128, activation="relu", kernel_initializer="he_uniform")
         self.d3 = Dense(64, activation="relu", kernel_initializer="he_uniform")
         self.actor = Dense(action_space, activation=None, kernel_initializer="he_uniform")
     
     def call(self, inputs):
         x = self.d1(inputs)
         x = self.d2(x)
-        x = self.d3(x)
+        #x = self.d3(x)
         return self.actor(x)
 
 class PPO_Critic(Model):
@@ -44,15 +44,15 @@ class PPO_Critic(Model):
         name="PPO_Critic"    
     ):
         super(PPO_Critic, self).__init__(name=name)
-        self.d1 = Dense(512, input_shape=(observation_space,), activation="relu", kernel_initializer="he_uniform")
-        self.d2 = Dense(256, activation="relu", kernel_initializer="he_uniform")
-        self.d3 = Dense(64, activation="relu", kernel_initializer="he_uniform")
+        self.d1 = Dense(128, input_shape=(observation_space,), activation="relu", kernel_initializer="he_uniform")
+        self.d2 = Dense(128, activation="relu", kernel_initializer="he_uniform")
+        #self.d3 = Dense(64, activation="relu", kernel_initializer="he_uniform")
         self.critic = Dense(1, activation="linear", kernel_initializer="he_uniform")
     
     def call(self, inputs):
         x = self.d1(inputs)
         x = self.d2(x)
-        x = self.d3(x)
+        #x = self.d3(x)
         return self.critic(x)
 
 
@@ -67,7 +67,7 @@ class PPO_Agent():
 
         self.EPISODES = 3000
         self.max_steps_per_episode = 500
-        self.lr = 0.0005
+        self.lr = 0.0001
         self.gamma = 0.95
         self.clip_epsilon = 0.3
         self.epsilon = np.finfo(np.float32).eps.item() 
@@ -95,11 +95,10 @@ class PPO_Agent():
         self.actor_optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
         self.critic_optimizer = tf.keras.optimizers.Adam(learning_rate=self.lr)
 
-        self.actor_train_iterations = 10
-        self.critic_train_itartions = 5
+        self.actor_train_iterations = 5
+        self.critic_train_iterations = 5
 
-        self.max_average = 300
-        self.n_epochs_per_batch = 5
+        self.max_average = 500
 
         self.ACTOR_LOSS_WEIGHT = 1
         self.CRITIC_LOSS_WEIGHT = 1
@@ -174,12 +173,10 @@ class PPO_Agent():
             batch_states = tf.convert_to_tensor(self.states)
             batch_log_probs = np.array(self.action_probs)
 
-            print("batch_log_probs", batch_log_probs)
-            print("actions", actions)
             # Calculate Advanatges
             batch_critic_values = np.array(self.critic_values)
             batch_advantages = batch_returns - batch_critic_values
-
+            batch_advantages = tf.convert_to_tensor(batch_advantages, dtype="float32")
             # Start Policy Training loop
             for _ in range(self.actor_train_iterations):
                 with tf.GradientTape() as tape:                    
@@ -187,9 +184,9 @@ class PPO_Agent():
                     calculate the ratios of the current batch """
 
                     logits = self.PPO_Actor(batch_states)
-                    logprobs = self.logprobabilities(np.squeeze(logits), actions)
+                    logprobs = self.logprobabilities(tf.squeeze(logits), actions)
                     logprobs = tf.expand_dims(logprobs, axis=-1)
-                    ratios = np.squeeze(tf.exp(logprobs - batch_log_probs))
+                    ratios = tf.squeeze(tf.exp(logprobs - batch_log_probs))
                     
                     min_advantage = tf.where(
                         batch_advantages > 0, 
@@ -200,7 +197,7 @@ class PPO_Agent():
                     policy_loss = -tf.reduce_mean(
                         tf.minimum(ratios * batch_advantages, min_advantage)
                     )
-
+                
                 # Do gradient ascent step
                 grads = tape.gradient(policy_loss, self.PPO_Actor.trainable_variables)
                 self.actor_optimizer.apply_gradients(zip(grads, self.PPO_Actor.trainable_variables))
