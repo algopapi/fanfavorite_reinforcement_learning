@@ -1,6 +1,8 @@
 import os
+from re import L
 import tensorflow as tf
 import tensorflow_quantum as tfq
+import tensorflow_probability as tfp
 
 import gym, cirq, sympy
 import pylab
@@ -52,19 +54,11 @@ def generate_circuit(qubits, n_layers):
 
     # Create encoding layer 
     circuit += cirq.Circuit(cirq.rx(inputs[l, i])(q) for i, q in enumerate(qubits))
+
+  # Add the last rotational gate encodings 
+  circuit += cirq.Circuit(one_qubit_rotations(q, params[n_layers, i]) for i, q in enumerate(qubits))
   
   return circuit, list(params.flat), list(inputs.flat)
-
-# Check procedure
-
-n_qubits, n_layers = 3, 1
-qubits = cirq.GridQubit.rect(1, n_qubits)
-circuit, parameters, inputs = generate_circuit(qubits, n_layers)
-
-print("parameters:", parameters)
-print("inputs = ", inputs)
-
-SVGCircuit(circuit)
 
 # Custom Quantum Layer
 class ReUploadingPQC(tf.keras.layers.Layer):
@@ -129,16 +123,6 @@ class Alternating(tf.keras.layers.Layer):
         return tf.matmul(inputs, self.w)
 
 
-
-
-n_qubits = 4 # dimension of the state vectors in cartpole
-n_layers = 5 # number of layers in the PQC
-n_actions = 2 # number of actions incartpole
-
-qubits = cirq.GridQubit.rect(1, n_qubits)
-ops = [cirq.Z(q) for q in qubits]
-observables = [reduce((lambda x, y: x * y), ops)]
-
 def generate_model_policy(qubits, n_layers, n_actions, beta, observables):
 
     input_tensor = tf.keras.Input(shape = (len(qubits), ),  )
@@ -154,11 +138,6 @@ def generate_model_policy(qubits, n_layers, n_actions, beta, observables):
 
     return model
 
-model = generate_model_policy(qubits, n_layers, n_actions, 1.0, observables)
-
-
-
-
 
 class PGAgent():
   #Policy Gradient Main Opimization Algorithm
@@ -166,12 +145,15 @@ class PGAgent():
     #Environment and PG parameters
     self.agent_name = "Vanilla_Gradient"
     self.env_name = env_name
-    self.env = gym.make(env_name)
+    self.env = gym.make(env_name, render_mode="human")
     self.action_space = self.env.action_space.n
     self.state_space = self.env.observation_space.shape[0]
+    print("state space:" , self.state_space)
+    print("action space: ", self.action_space)
 
     self.EPISODES = 3000
     self.lr = 0.001
+    self.batch_size = 10
 
     #instantiate games, plot memory
     self.states, self.actions, self.rewards = [], [], []
@@ -183,17 +165,21 @@ class PGAgent():
     if not os.path.exists(self.Save_Path): os.makedirs(self.Save_Path)
     self.path = '{}_{}_LR_{}'.format(self.agent_name, self.env_name, self.lr)
     self.Model_name = os.path.join(self.Save_Path, self.path)
-
-    self.Actor = generate_model_policy(qubits, n_layers, n_actions, 1.0, observables)
-    tf.keras.utils.plot_model(self.Actor, show_shapes=True, dpi=70)
     
     self.n_qubits = 4
-    self.n_layers = 5
+    self.n_layers = 6
     self.n_actions = 2
 
     self.qubits = cirq.GridQubit.rect(1, self.n_qubits)
-    self.ops = [cirq.Z(q) for q in qubits]
-    self.observables = [reduce((lambda x, y: x * y), ops)]
+    self.ops = [cirq.Z(q) for q in self.qubits]
+    self.observables = [reduce((lambda x, y: x * y), self.ops)]
+
+    self.Actor = generate_model_policy(self.qubits, self.n_layers, self.n_actions, 1.0, self.observables)
+    self.optimizer_in = tf.keras.optimizers.Adam(learning_rate=0.1, amsgrad=True)
+    self.optimizer_var = tf.keras.optimizers.Adam(learning_rate=0.01, amsgrad=True)
+    self.optimizer_out = tf.keras.optimizers.Adam(learning_rate=0.1, amsgrad=True)
+    self.w_in, self.w_var, self.w_out = 1, 0, 2
+
 
     self.max_average = 300
 
@@ -210,7 +196,7 @@ class PGAgent():
     return action
 
   def step(self,action):
-    next_state, reward, done, info = self.env.step(action)
+    next_state, reward, done, truncated, info = self.env.step(action)
     return next_state, reward, done, info
 
   def load(self, Actor_name):
@@ -227,6 +213,7 @@ class PGAgent():
       sum_r = sum_r * gamma + reward[i]
       discounted_r[i] = sum_r
   
+    discounted_r = (discounted_r - np.mean(discounted_r)) / (np.std(discounted_r) + 1e-8)
     return discounted_r
 
   def compute_loss(self, prob, action, reward):
@@ -237,36 +224,33 @@ class PGAgent():
 
 
   def replay(self):
-    
     states = np.vstack(self.states)
     actions = np.vstack(self.actions)
-    
-    #Calculate the discounted rewards
     discounted_r = self.discount_rewards(self.rewards)
 
+    with tf.GradientTape() as tape:
+      tape.watch(self.Actor.trainable_variables)
+      logits = self.Actor(states)
+      #p_actions = tf.gather_nd(logits, actions)
+      p_actions = tf.reduce_sum(tf.multiply(logits, actions), axis=-1)
+      log_probs = tf.math.log(p_actions)
+      loss = tf.math.reduce_sum(-log_probs * discounted_r) / self.batch_size
+
+    grads = tape.gradient(loss, self.Actor.trainable_variables)
+    for optimizer, w in zip(
+        [self.optimizer_in, self.optimizer_var, self.optimizer_out],
+        [self.w_in, self.w_var, self.w_out]):
+        optimizer.apply_gradients([(grads[w], self.Actor.trainable_variables[w])])
+
     # custom training loop
-    # iterate over batches of trainin data
-    for state, action, d_reward in zip(states, actions, discounted_r):
-        
-      with tf.GradientTape() as tape:
-        # forward pass of the layer
-        prob = self.Actor(np.array(state, ndmin=2), training=True)
-        #print("probability = ", prob)
-        # Calcualte the policy loss
-        loss =  self.compute_loss(prob, action, d_reward)
-
-      # use the gradient tape to automatically retrieve the gradients of the trainable variables with respect to the loss
-      grads = tape.gradient(loss, self.Actor.trainable_variables)
-
-      # Run one step of gradient ascent by updating the value of the variables to miminize the loss
-      self.optimizer.apply_gradients(zip(grads, self.Actor.trainable_variables))
+    
 
     self.states, self.actions, self.rewards = [], [], []
   
   def run(self):
     for e in range(self.EPISODES):
       state = self.env.reset()
-      state = np.reshape(state, [1, self.state_space])
+      state = np.reshape(state[0], [1, self.state_space])
       done, score, SAVING = False, 0, ''
 
       while not done:
@@ -276,13 +260,12 @@ class PGAgent():
 
         next_state, reward, done, _ = self.step(action)
         next_state = np.reshape(next_state, [1, self.state_space])
-
         self.remember(state, action, reward)
 
         state = next_state
         score += reward
         
-        self.PlotModel(score, e)
+        #self.PlotModel(score, e)
 
         if done:
           
@@ -317,27 +300,24 @@ class PGAgent():
               pass
       return self.average[-1]
   
-  def test(self):
-    self.load("cartpole-ddqn.h5")
-    for e in range(self.EPISODES):
-        state = self.env.reset()
-        state = np.reshape(state, [1, self.state_size])
-        done = False
-        i = 0
-        while not done:
-          self.env.render()
-          action = np.argmax(self.model.predict(state))
-          next_state, reward, done, _ = self.env.step(action)
-          state = np.reshape(next_state, [1, self.state_size])
-          i += 1
-          if done:
-              print("episode: {}/{}, score: {}".format(e, self.EPISODES, i))
-              break
+  # def test(self):
+  #   self.load("cartpole-ddqn.h5")
+  #   for e in range(self.EPISODES):
+  #       state = self.env.reset()
+  #       state = np.reshape(state, [1, self.state_size])
+  #       done = False
+  #       i = 0
+  #       while not done:
+  #         self.env.render()
+  #         action = np.argmax(self.model.predict(state))
+  #         next_state, reward, done, _ = self.env.step(action)
+  #         state = np.reshape(next_state, [1, self.state_size])
+  #         i += 1
+  #         if done:
+  #             print("episode: {}/{}, score: {}".format(e, self.EPISODES, i))
+  #             break
 
 if __name__ == "__main__":
     env_name = 'CartPole-v1'
-    #env_name = 'PongDeterministic-v4'
     agent = PGAgent(env_name)
     agent.run()
-    #agent.test()
-    #agent.test('Models/Pong-v0_PG_2.5e-05.h5')

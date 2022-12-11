@@ -36,8 +36,6 @@ class PPO_Network(Model):
         return self.actor(x), self.critic(x)
 
 
-    
-
 class PPO_Agent():
     def __init__(self, env_name):
         self.env_name = env_name
@@ -98,11 +96,6 @@ class PPO_Agent():
         
         discounted_rewards = self.discounted_rewards(rewards, dones)
         advantages = discounted_rewards - np.squeeze(values)
-
-        print("action probs", log_probs)
-        print("states", states)
-        print("discounted_rewards", discounted_rewards)
-        print("advantages", advantages)
 
         # Train Loop on Critic
         actor_losses = []
