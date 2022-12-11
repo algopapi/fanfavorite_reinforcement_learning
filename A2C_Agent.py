@@ -20,10 +20,10 @@ from utils.plotmodel import PlotModel
 class A2C_Network(Model):
     """ Actor-Critic Style Network"""
     def __init__(
-        self, 
-        observation_space, 
+        self,
+        observation_space,
         action_space,
-        name="A2C_Network"    
+        name="A2C_Network"
     ):
         super(A2C_Network, self).__init__(name=name)
         self.d1 = Dense(512, input_shape=(observation_space,), activation="relu", kernel_initializer="he_uniform")
